@@ -2,24 +2,28 @@ const express = require('express');
 const axios = require('axios');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const mongoose = require('mongoose');
 const { google } = require('googleapis');
 const vision = require('@google-cloud/vision');
 const dotenv = require('dotenv');
 const path = require('path');
-const SensitiveImage = require('./models/SensitiveImage.js');
+const fs = require('fs');
+const admin = require('firebase-admin');
+const { Logging } = require('@google-cloud/logging');
 
 dotenv.config();
+
+// Initialize Firebase Admin SDK
+const serviceAccount = require('process.env.FIRESTORE_SERVICE_ACCOUNT_KEY');
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+const db = admin.firestore();
+const imagesRef = db.collection('SensitiveImages');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(bodyParser.json());
-
-// MongoDB Connection
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('MongoDB connected'))
-  .catch(err => console.error('MongoDB connection error:', err));
 
 // Google OAuth2 Setup
 const oauth2Client = new google.auth.OAuth2(
@@ -33,9 +37,68 @@ const visionClient = new vision.ImageAnnotatorClient({
   keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS,
 });
 
-// ----------- Routes -----------
+// Google Analytics tracking function
+const trackGAEvent = async (eventName, params = {}) => {
+  const measurementId = process.env.GA_MEASUREMENT_ID;
+  const apiSecret = process.env.GA_API_SECRET;
 
-// Proxy image request
+  try {
+    await axios.post(
+      `https://www.google-analytics.com/mp/collect?measurement_id=${measurementId}&api_secret=${apiSecret}`,
+      {
+        client_id: 'backend-service',
+        events: [
+          {
+            name: eventName,
+            params: {
+              engagement_time_msec: '100',
+              ...params,
+            },
+          },
+        ],
+      }
+    );
+  } catch (error) {
+    console.error('Failed to send GA event:', error.message);
+  }
+};
+
+// Google Cloud Logging
+const logging = new Logging();
+const log = logging.log('privasee-backend-events');
+
+const logRequest = async (label, requestData) => {
+  const metadata = {
+    resource: { type: 'global' },
+    labels: { source: label },
+  };
+  const entry = log.entry(metadata, requestData);
+  try {
+    await log.write(entry);
+  } catch (err) {
+    console.error('Cloud Logging write failed:', err.message);
+  }
+};
+
+// ========== Routes ==========
+
+app.post('/log/frontend', async (req, res) => {
+  const { source, event, data } = req.body;
+  if (!event || !source) return res.status(400).json({ error: 'Missing fields' });
+
+  try {
+    await logRequest(source, {
+      event,
+      ...data,
+      timestamp: new Date().toISOString(),
+    });
+    res.status(200).json({ message: 'Logged to Cloud' });
+  } catch (error) {
+    console.error('Failed to log frontend event:', error.message);
+    res.status(500).json({ error: 'Logging failed' });
+  }
+});
+
 app.get('/proxy', async (req, res) => {
   try {
     const { url } = req.query;
@@ -49,7 +112,7 @@ app.get('/proxy', async (req, res) => {
   }
 });
 
-// Google OAuth redirect
+// Google OAuth Redirect
 app.get('/auth/google', (req, res) => {
   const url = oauth2Client.generateAuthUrl({
     access_type: 'offline',
@@ -59,30 +122,23 @@ app.get('/auth/google', (req, res) => {
       'https://www.googleapis.com/auth/photoslibrary.readonly',
       'https://www.googleapis.com/auth/userinfo.email',
       'https://www.googleapis.com/auth/userinfo.profile',
-      'openid'
-    ]
+      'openid',
+    ],
   });
   res.redirect(url);
 });
 
-// Exchange code for tokens
 app.post('/auth/google/callback', async (req, res) => {
   const { code } = req.body;
   try {
     const { tokens } = await oauth2Client.getToken(code);
-    res.json({
-      access_token: tokens.access_token,
-      refresh_token: tokens.refresh_token,
-      id_token: tokens.id_token,
-      scope: tokens.scope,
-    });
+    res.json(tokens);
   } catch (error) {
-    console.error('Error exchanging code for tokens:', error);
-    res.status(400).json({ error: 'Failed to exchange code' });
+    console.error('Token exchange failed:', error);
+    res.status(400).json({ error: 'Exchange failed' });
   }
 });
 
-// Verify ID token directly
 app.post('/auth/google/token', async (req, res) => {
   const { idToken } = req.body;
   try {
@@ -90,20 +146,18 @@ app.post('/auth/google/token', async (req, res) => {
       idToken,
       audience: process.env.GOOGLE_CLIENT_ID,
     });
-    const payload = ticket.getPayload();
-    res.json({ verified: true, user: payload });
+    res.json({ verified: true, user: ticket.getPayload() });
   } catch (error) {
-    console.error('Error verifying ID Token:', error);
+    console.error('Token verification failed:', error);
     res.status(400).json({ message: 'Token verification failed' });
   }
 });
 
-// Fetch photos
 app.post('/photos', async (req, res) => {
   const { accessToken } = req.body;
   try {
     const response = await axios.get('https://photoslibrary.googleapis.com/v1/mediaItems', {
-      headers: { Authorization: `Bearer ${accessToken}` }
+      headers: { Authorization: `Bearer ${accessToken}` },
     });
     res.json(response.data.mediaItems);
   } catch (error) {
@@ -112,29 +166,34 @@ app.post('/photos', async (req, res) => {
   }
 });
 
-// OCR
 app.post('/ocr', async (req, res) => {
   const { imageUrl } = req.body;
   try {
     const [result] = await visionClient.textDetection(imageUrl);
-    const detections = result.textAnnotations;
-    if (detections.length > 0) {
-      const fullText = detections[0].description;
-      const sensitiveWords = detections.slice(1).map(d => ({
-        text: d.description,
-        boundingPoly: d.boundingPoly,
-      }));
-      res.json({ fullText, sensitiveWords });
-    } else {
-      res.json({ fullText: '', sensitiveWords: [] });
-    }
+    const detections = result.textAnnotations || [];
+    const fullText = detections[0]?.description || '';
+    const sensitiveWords = detections.slice(1).map(d => ({
+      text: d.description,
+      boundingPoly: d.boundingPoly,
+    }));
+
+    await logRequest('ocr', {
+      event: 'OCR Completed',
+      imageUrl,
+      charCount: fullText.length,
+      sensitiveWordCount: sensitiveWords.length,
+      timestamp: new Date().toISOString(),
+    });
+
+    await trackGAEvent('ocr_completed', { image_url: imageUrl });
+
+    res.json({ fullText, sensitiveWords });
   } catch (error) {
-    console.error('Error during OCR:', error);
+    console.error('OCR failed:', error);
     res.status(500).json({ message: 'OCR failed' });
   }
 });
 
-// PII Detection using Gemini
 app.post('/checkSensitiveText', async (req, res) => {
   const { text } = req.body;
   try {
@@ -145,23 +204,7 @@ app.post('/checkSensitiveText', async (req, res) => {
           {
             parts: [
               {
-                text: `You are given OCR extracted text from an image.
-
-Your job is to decide whether the text contains personally identifiable information (PII).
-
-If it does:
-- Reply in this JSON format: 
-  {"type": "SSN", "value": "123-45-6789"}
-
-If it does NOT:
-- Reply exactly: {"type": "Not Sensitive", "value": ""}
-
-Allowed types are: SSN, Phone Number, Email Address, Name, Address, Credit Card, Other PII.
-
-Here is the text:
-"${text}"
-
-Only reply with the JSON, nothing else.`
+                text: `You are given OCR extracted text from an image.\n\nYour job is to decide whether the text contains personally identifiable information (PII).\n\nIf it does:\n- Reply in this JSON format: \n  {"type": "SSN", "value": "123-45-6789"}\n\nIf it does NOT:\n- Reply exactly: {"type": "Not Sensitive", "value": ""}\n\nAllowed types are: SSN, Phone Number, Email Address, Name, Address, Credit Card, Other PII.\n\nHere is the text:\n"${text}"\n\nOnly reply with the JSON, nothing else.`,
               },
             ],
           },
@@ -169,58 +212,59 @@ Only reply with the JSON, nothing else.`
       },
       { params: { key: process.env.GEMINI_API_KEY } }
     );
+
     let geminiText = geminiResponse.data.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
     geminiText = geminiText.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(geminiText);
+
+    await logRequest('gemini', {
+      event: 'Gemini Classification',
+      resultType: parsed.type,
+      timestamp: new Date().toISOString(),
+    });
+
+    await trackGAEvent('gemini_classified', { type: parsed.type });
+
     res.json({ type: parsed.type, value: parsed.value });
   } catch (error) {
-    console.error('Gemini API failed:', error.response?.data || error.message);
+    console.error('Gemini failed:', error.message);
     res.status(500).json({ error: 'Failed to classify text' });
   }
 });
 
-// Save sensitive status
 app.post('/mark-sensitive', async (req, res) => {
   const { imageId, status } = req.body;
-  if (!imageId || !status) {
-    return res.status(400).json({ error: 'Missing imageId or status' });
-  }
+  if (!imageId || !status) return res.status(400).json({ error: 'Missing imageId or status' });
+
   try {
-    await SensitiveImage.create({ imageId, status });
+    await imagesRef.doc(imageId).set({ imageId, status, updatedAt: Date.now() });
+    await trackGAEvent('image_marked', { status });
     res.status(200).json({ message: 'Image marked' });
   } catch (error) {
-    console.error('Error marking image:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Firestore write error:', error);
+    res.status(500).json({ error: 'Failed to save image' });
   }
 });
 
-// Get all previously marked images
 app.get('/get-marked-images', async (req, res) => {
   try {
-    const marked = await SensitiveImage.find({}, 'imageId');
-    const markedIds = marked.map(doc => doc.imageId);
+    const snapshot = await imagesRef.get();
+    const markedIds = snapshot.docs.map(doc => doc.id);
     res.json({ marked: markedIds });
   } catch (error) {
-    console.error('Error fetching marked images:', error);
-    res.status(500).json({ error: 'Failed to fetch marked images' });
+    console.error('Failed to fetch marked:', error);
+    res.status(500).json({ error: 'Fetch failed' });
   }
 });
 
 // Serve React frontend
-const fs = require('fs');
-
 const buildPath = path.join(__dirname, 'build', 'index.html');
-
 if (fs.existsSync(buildPath)) {
   app.use(express.static(path.join(__dirname, 'build')));
-  app.get('/{*any}', (req, res) => {
-    res.sendFile(buildPath);
-  });
+  app.get('/{*any}', (req, res) => res.sendFile(buildPath));
 } else {
   console.warn('⚠️ Build folder not found. React frontend will not be served.');
 }
 
-
-// Start server
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

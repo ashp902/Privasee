@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import axios from 'axios';
 import 'bootstrap/dist/css/bootstrap.min.css';
+import ReactGA from 'react-ga4';
+import { logToCloud } from './utils/logToCloud';
 
 function Dashboard() {
   const [imagesWithText, setImagesWithText] = useState([]);
@@ -82,6 +84,12 @@ function Dashboard() {
       }
 
       setImagesWithText(sensitiveImages);
+
+      ReactGA.event({
+        category: 'Image',
+        action: 'Fetched Google Photos',
+        label: 'MediaItems API'
+      });
     } catch (error) {
       console.error('Failed to fetch photos', error);
     } finally {
@@ -151,6 +159,17 @@ function Dashboard() {
       ctx.drawImage(offCanvas, minX, minY);
     }
 
+    ReactGA.event({
+        category: 'Image',
+        action: 'Downloaded Blurred Image',
+        label: selectedImage.id
+      });
+
+    await logToCloud({
+        event: 'Downloaded Blurred Image',
+        data: { imageId: selectedImage.id },
+      });
+
     const link = document.createElement('a');
     link.download = 'blurred_sensitive_image.png';
     link.href = canvas.toDataURL();
@@ -173,6 +192,16 @@ function Dashboard() {
 
   const handleNotSensitive = async (image) => {
     try {
+        ReactGA.event({
+            category: 'Image',
+            action: 'Marked Not Sensitive',
+            label: image.id
+          });
+
+          await logToCloud({
+            event: 'Marked Not Sensitive',
+            data: { imageId: image.id },
+          });
       await axios.post(`${process.env.REACT_APP_BACKEND_URL}/mark-sensitive`, {
         imageId: image.id,
         status: 'Not Sensitive',
@@ -187,6 +216,11 @@ function Dashboard() {
   const logout = () => {
     localStorage.clear();
     window.location.href = '/';
+
+    ReactGA.event({
+        category: 'User',
+        action: 'Logout'
+      });
   };
 
   return (

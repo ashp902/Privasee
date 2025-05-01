@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import ReactGA from 'react-ga4';
 
 function OAuthCallback() {
   const navigate = useNavigate();
@@ -27,6 +28,12 @@ function OAuthCallback() {
             const userName = decoded.name || 'User';
             localStorage.setItem('userName', userName);
           }
+
+          ReactGA.event({
+            category: 'User',
+            action: 'Login Successful'
+          });
+
         navigate('/dashboard');
       } else {
         console.error('No access token returned');

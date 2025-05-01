@@ -1,10 +1,17 @@
 import { useNavigate } from 'react-router-dom';
 import 'bootstrap/dist/css/bootstrap.min.css';
+import ReactGA from 'react-ga4';
 
 function Login() {
   const navigate = useNavigate();
 
   const handleGoogleLogin = () => {
+    ReactGA.event({
+        category: 'User',
+        action: 'Initiated Login',
+        label: 'Connect Google Button'
+      });
+      
     window.location.href = `${process.env.REACT_APP_BACKEND_URL}/auth/google`;
   };
 
