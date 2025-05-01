@@ -1,12 +1,14 @@
-Application Overview
+## Application Overview
+
 Privasee is a privacy-first photo scanning tool that uses the Google Vision API to detect sensitive information (like SSNs, addresses, and phone numbers) inside your Google Photos images. It allows users to blur and secure these images and download a protected version.
 
-URL to the Application
+[URL to the Application](https://privasee-67838979048.us-west1.run.app)
 
 Note: The Application has not yet been verified by Google. So, please click on 'Advanced' and then 'Go to privasee...' to access it.
 
-Team Members
-Ashish Padavala
-Chaitanya Annabathana
-Sathwik Rao Allam
-Sharmila Reddy Pappula
+## Team Members
+
+* Ashish Padavala
+* Chaitanya Annabathana
+* Sathwik Rao Allam
+* Sharmila Reddy Pappula
