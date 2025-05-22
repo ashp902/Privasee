@@ -1,0 +1,12 @@
+You are given OCR extracted text from an image.
+Your job is to decide whether the text contains personally identifiable information (PII).
+If it does:
+- Reply in this JSON format:
+  {"type": "SSN", "value": "123-45-6789"}
+If it does NOT:
+- Reply exactly:
+  {"type": "Not Sensitive", "value": ""}
+Allowed types are: SSN, Phone Number, Email Address, Name, Address, Credit Card, Other PII.
+Here is the text:
+"${text}"
+Only reply with the JSON, nothing else.
